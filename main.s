@@ -1,4 +1,8 @@
-// IMPORTAR ARCHIVO CONSTANTS.S
+// ===============================
+// main.s  (AES-128: AddRoundKey + SubBytes)
+// ===============================
+
+// IMPORTAR ARCHIVO CONSTANTS.S (Sbox, Rcon)
 .include "constants.s"
 
 // ===== CADENAS DE TEXTO =====
@@ -23,26 +27,32 @@
     debug_ark: .asciz "Resultado AddRoundKey:\n"
         lenDebugARK = . - debug_ark
 
+    debug_sub: .asciz "Resultado SubBytes:\n"
+        lenDebugSub = . - debug_sub
+
 // ===== RESERVACION DE MEMORIA =====
 .section .bss
     .global matState
-    matState:       .space 16, 0         // Matriz de estado del texto en claro de 128 bits
+    matState:       .space 16, 0       // estado de 16 bytes (column-major)
 
     .global key
-    key:            .space 16, 0         // Matriz de llave inicial de 128 bits
+    key:            .space 16, 0       // clave de 16 bytes (column-major)
 
     .global criptograma
-    criptograma:    .space 16, 0         // Buffer para almacenar el resultado de la encriptacion
+    criptograma:    .space 16, 0       // salida de AddRoundKey
 
-    buffer:         .space 256, 0        // Buffer utilizado para almacenar la entrada del usuario
-    temp_buffer:    .space 64, 0         // Buffer temporal
+    .global state_sub
+    state_sub:      .space 16, 0       // salida de SubBytes
+
+    buffer:         .space 256, 0      // buffer de entrada
+    temp_buffer:    .space 64, 0       // buffer temporal
 
 // ===== MACROS =====
 .macro print fd, buffer, len
     mov x0, \fd
     ldr x1, =\buffer
     mov x2, \len
-    mov x8, #64
+    mov x8, #64          // sys_write
     svc #0
 .endm
 
@@ -50,7 +60,7 @@
     mov x0, \fd
     ldr x1, =\buffer
     mov x2, \len
-    mov x8, #63
+    mov x8, #63          // sys_read
     svc #0
 .endm
 
@@ -58,7 +68,8 @@
 .section .text
 
 // ----------------------
-// Función AddRoundKey
+// AddRoundKey
+// x0 = ptr state, x1 = ptr key, x2 = ptr out
 // ----------------------
 .type   addRoundKey, %function
 .global addRoundKey
@@ -66,14 +77,10 @@ addRoundKey:
     stp x29, x30, [sp, #-16]!
     mov x29, sp
 
-    // x0 = ptr state (matState)
-    // x1 = ptr key   (key)
-    // x2 = ptr out   (criptograma)
-
-    ldr x3, [x0]        // state[0..7]
-    ldr x4, [x0, #8]    // state[8..15]
-    ldr x5, [x1]        // key[0..7]
-    ldr x6, [x1, #8]    // key[8..15]
+    ldr x3, [x0]          // state[0..7]
+    ldr x4, [x0, #8]      // state[8..15]
+    ldr x5, [x1]          // key[0..7]
+    ldr x6, [x1, #8]      // key[8..15]
 
     eor x7, x3, x5
     eor x8, x4, x6
@@ -87,7 +94,41 @@ addRoundKey:
 
 
 // ----------------------
-// Función para leer cadena de texto y convertir a bytes ASCII
+// SubBytes (entrada x0, salida x1)
+// Reemplaza cada byte por Sbox[byte]
+// ----------------------
+.type   subBytes, %function
+.global subBytes
+subBytes:
+    stp x29, x30, [sp, #-16]!
+    mov x29, sp
+
+    mov x20, x0      // entrada
+    mov x21, x1      // salida
+    mov x22, #0      // i = 0..15
+
+    ldr x23, =Sbox   // dirección de la Sbox en constants.s
+
+sub_loop:
+    cmp x22, #16
+    b.ge sub_done
+
+    ldrb w24, [x20, x22]   // byte entrada
+    uxtb w24, w24
+    ldrb w25, [x23, x24]   // Sbox[byte]
+    strb w25, [x21, x22]   // escribir en salida
+
+    add x22, x22, #1
+    b sub_loop
+
+sub_done:
+    ldp x29, x30, [sp], #16
+    ret
+    .size subBytes, (. - subBytes)
+
+
+// ----------------------
+// Leer texto (máx 16) → matState (column-major)
 // ----------------------
 .type   readTextInput, %function
 .global readTextInput
@@ -95,45 +136,43 @@ readTextInput:
     stp x29, x30, [sp, #-16]!
     mov x29, sp
 
-    // Leer entrada del usuario
     read 0, buffer, 256
     
-    // Convertir caracteres a bytes ASCII y almacenar en matriz
-    ldr x1, =buffer           // Puntero al buffer de entrada
-    ldr x2, =matState         // Puntero a matriz de estado
-    mov x3, #0                // Contador de bytes procesados
+    ldr x1, =buffer
+    ldr x2, =matState
+    mov x3, #0
     
 convert_text_loop:
     cmp x3, #16
     b.ge pad_remaining_bytes
     
-    ldrb w4, [x1, x3]         // Cargar carácter
-    cmp w4, #10               // Verificar si es newline
+    ldrb w4, [x1, x3]
+    cmp w4, #10         // '\n'
     b.eq pad_remaining_bytes
-    cmp w4, #0                // Verificar si es null terminator
+    cmp w4, #0          // '\0'
     b.eq pad_remaining_bytes
     
-    // Almacenar carácter como byte ASCII en column-major order
+    // column-major: offset = (index % 4) * 4 + (index / 4)
     mov x7, #4
-    udiv x8, x3, x7           // columna = index / 4
-    msub x9, x8, x7, x3       // fila = index % 4
-    mul x10, x9, x7           // offset = fila * 4
-    add x10, x10, x8          // offset final = fila * 4 + columna
+    udiv x8, x3, x7          // col = index / 4
+    msub x9, x8, x7, x3      // row = index % 4
+    mul x10, x9, x7          // row*4
+    add x10, x10, x8         // + col
     
-    strb w4, [x2, x10]        // Almacenar byte ASCII
+    strb w4, [x2, x10]
     add x3, x3, #1
     b convert_text_loop
     
 pad_remaining_bytes:
     cmp x3, #16
     b.ge convert_text_done
-    
+
     mov x7, #4
     udiv x8, x3, x7
     msub x9, x8, x7, x3
     mul x10, x9, x7
     add x10, x10, x8
-    
+
     mov w4, #0
     strb w4, [x2, x10]
     add x3, x3, #1
@@ -146,7 +185,7 @@ convert_text_done:
 
 
 // ----------------------
-// Función para convertir clave hexadecimal
+// Convertir clave hex (32 chars) → key (column-major)
 // ----------------------
 .type   convertHexKey, %function
 .global convertHexKey
@@ -180,16 +219,19 @@ skip_non_hex:
     b skip_non_hex
     
 process_hex_pair:
+    // alto nibble
     ldrb w4, [x1, x11]
     add x11, x11, #1
     bl hex_char_to_nibble
     lsl w5, w0, #4
     
+    // bajo nibble
     ldrb w4, [x1, x11]
     add x11, x11, #1
     bl hex_char_to_nibble
     orr w5, w5, w0
     
+    // guardar en column-major
     mov x7, #4
     udiv x8, x3, x7
     msub x9, x8, x7, x3
@@ -207,7 +249,7 @@ convert_hex_done:
 
 
 // ----------------------
-// Funciones auxiliares hex
+// Auxiliares HEX
 // ----------------------
 is_hex_char:
     cmp w4, #'0'
@@ -215,7 +257,7 @@ is_hex_char:
     cmp w4, #'9'
     b.le is_hex
     
-    orr w4, w4, #0x20
+    orr w4, w4, #0x20       // tolower
     cmp w4, #'a'
     b.lt not_hex
     cmp w4, #'f'
@@ -255,7 +297,8 @@ hex_error:
 
 
 // ----------------------
-// Función para imprimir matriz
+// printMatrix: imprime mensaje y matriz 4x4 en hex
+// x0 = ptr matriz, x1 = ptr msg, x2 = len msg
 // ----------------------
 .type   printMatrix, %function
 .global printMatrix
@@ -263,29 +306,32 @@ printMatrix:
     stp x29, x30, [sp, #-48]!
     mov x29, sp
     
-    str x0, [sp, #16]
-    str x1, [sp, #24]
-    str x2, [sp, #32]
+    // guardar params
+    str x0, [sp, #16]   // matriz
+    str x1, [sp, #24]   // msg
+    str x2, [sp, #32]   // len
     
+    // imprimir mensaje
     mov x0, #1
     ldr x1, [sp, #24]
     ldr x2, [sp, #32]
     mov x8, #64
     svc #0
     
-    mov x23, #0
+    // recorrer matriz 4x4 (column-major)
+    mov x23, #0               // fila
 print_row_loop:
     cmp x23, #4
     b.ge print_matrix_done
     
-    mov x24, #0
+    mov x24, #0               // columna
 print_col_loop:
     cmp x24, #4
     b.ge print_row_newline
     
     mov x25, #4
-    mul x25, x23, x25
-    add x25, x25, x24
+    mul x25, x23, x25         // fila*4
+    add x25, x25, x24         // +col
     
     ldr x20, [sp, #16]
     ldrb w0, [x20, x25]
@@ -307,7 +353,7 @@ print_matrix_done:
 
 
 // ----------------------
-// Función para imprimir byte en hexadecimal
+// print_hex_byte (W0 = byte a imprimir)
 // ----------------------
 print_hex_byte:
     stp x29, x30, [sp, #-16]!
@@ -317,6 +363,7 @@ print_hex_byte:
     lsr w1, w1, #4
     and w2, w0, #0x0F
     
+    // nibble alto
     cmp w1, #10
     b.lt high_digit
     add w1, w1, #'A' - 10
@@ -325,6 +372,7 @@ high_digit:
     add w1, w1, #'0'
 high_done:
     
+    // nibble bajo
     cmp w2, #10
     b.lt low_digit
     add w2, w2, #'A' - 10
@@ -351,7 +399,7 @@ low_done:
 
 
 // ----------------------
-// Función de encriptación (AddRoundKey)
+// encript: AddRoundKey -> SubBytes
 // ----------------------
 .type   encript, %function
 .global encript
@@ -359,10 +407,16 @@ encript:
     stp x29, x30, [sp, #-16]!
     mov x29, sp
 
+    // AddRoundKey → criptograma
     ldr x0, =matState
     ldr x1, =key
     ldr x2, =criptograma
     bl  addRoundKey
+
+    // SubBytes(criptograma → state_sub)
+    ldr x0, =criptograma
+    ldr x1, =state_sub
+    bl  subBytes
 
     ldp x29, x30, [sp], #16
     ret
@@ -370,38 +424,46 @@ encript:
 
 
 // ----------------------
-// Función principal
+// _start
 // ----------------------
 .type   _start, %function
 .global _start
 _start:
-    // Leer texto como cadena
+    // Leer texto
     print 1, msg_txt, lenMsgTxt
     bl readTextInput
-    
-    // Debug: mostrar matriz de estado
+
+    // Mostrar estado
     ldr x0, =matState
     ldr x1, =debug_state
     mov x2, lenDebugState
     bl printMatrix
-    
-    // Leer clave en hexadecimal
+
+    // Leer clave
     print 1, msg_key, lenMsgKey
     bl convertHexKey
-    
-    // Debug: mostrar matriz de clave
+
+    // Mostrar clave
     ldr x0, =key
     ldr x1, =debug_key
     mov x2, lenDebugKey
     bl printMatrix
-    
-    // Encriptar (AddRoundKey) y mostrar resultado
+
+    // Ejecutar AddRoundKey y SubBytes
     bl encript
+
+    // Mostrar AddRoundKey
     ldr x0, =criptograma
     ldr x1, =debug_ark
     mov x2, lenDebugARK
     bl printMatrix
-    
+
+    // Mostrar SubBytes
+    ldr x0, =state_sub
+    ldr x1, =debug_sub
+    mov x2, lenDebugSub
+    bl printMatrix
+
     // Salir
     mov x0, #0
     mov x8, #93
