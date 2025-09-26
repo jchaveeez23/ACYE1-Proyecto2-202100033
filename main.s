@@ -1,5 +1,5 @@
 // ===============================
-// main.s  (AES-128: AddRoundKey + SubBytes)
+// main.s  (AES-128: AddRoundKey + SubBytes + ShiftRows)
 // ===============================
 
 // IMPORTAR ARCHIVO CONSTANTS.S (Sbox, Rcon)
@@ -30,6 +30,9 @@
     debug_sub: .asciz "Resultado SubBytes:\n"
         lenDebugSub = . - debug_sub
 
+    debug_shift: .asciz "Resultado ShiftRows:\n"
+        lenDebugShift = . - debug_shift
+
 // ===== RESERVACION DE MEMORIA =====
 .section .bss
     .global matState
@@ -43,6 +46,9 @@
 
     .global state_sub
     state_sub:      .space 16, 0       // salida de SubBytes
+
+    .global state_shift
+    state_shift:    .space 16, 0       // salida de ShiftRows
 
     buffer:         .space 256, 0      // buffer de entrada
     temp_buffer:    .space 64, 0       // buffer temporal
@@ -127,6 +133,61 @@ sub_done:
     .size subBytes, (. - subBytes)
 
 
+// ----------------------
+// ShiftRows (row-major): x0 = in, x1 = out
+// ----------------------
+.type   shiftRows, %function
+.global shiftRows
+shiftRows:
+    stp x29, x30, [sp, #-16]!
+    mov x29, sp
+    mov x20, x0        // in
+    mov x21, x1        // out
+
+    // Fila 0: idx 0,1,2,3  (copia)
+    ldrb w0, [x20, #0]
+    ldrb w1, [x20, #1]
+    ldrb w2, [x20, #2]
+    ldrb w3, [x20, #3]
+    strb w0, [x21, #0]
+    strb w1, [x21, #1]
+    strb w2, [x21, #2]
+    strb w3, [x21, #3]
+
+    // Fila 1: idx 4,5,6,7  (rota 1 izq → 5,6,7,4)
+    ldrb w0, [x20, #4]
+    ldrb w1, [x20, #5]
+    ldrb w2, [x20, #6]
+    ldrb w3, [x20, #7]
+    strb w1, [x21, #4]
+    strb w2, [x21, #5]
+    strb w3, [x21, #6]
+    strb w0, [x21, #7]
+
+    // Fila 2: idx 8,9,10,11 (rota 2 izq → 10,11,8,9)
+    ldrb w0, [x20, #8]
+    ldrb w1, [x20, #9]
+    ldrb w2, [x20, #10]
+    ldrb w3, [x20, #11]
+    strb w2, [x21, #8]
+    strb w3, [x21, #9]
+    strb w0, [x21, #10]
+    strb w1, [x21, #11]
+
+    // Fila 3: idx 12,13,14,15 (rota 3 izq → 15,12,13,14)
+    ldrb w0, [x20, #12]
+    ldrb w1, [x20, #13]
+    ldrb w2, [x20, #14]
+    ldrb w3, [x20, #15]
+    strb w3, [x21, #12]
+    strb w0, [x21, #13]
+    strb w1, [x21, #14]
+    strb w2, [x21, #15]
+
+    ldp x29, x30, [sp], #16
+    ret
+    .size shiftRows, (. - shiftRows)
+ 
 // ----------------------
 // Leer texto (máx 16) → matState (column-major)
 // ----------------------
@@ -399,7 +460,7 @@ low_done:
 
 
 // ----------------------
-// encript: AddRoundKey -> SubBytes
+// encript: AddRoundKey -> SubBytes -> ShiftRows
 // ----------------------
 .type   encript, %function
 .global encript
@@ -417,6 +478,11 @@ encript:
     ldr x0, =criptograma
     ldr x1, =state_sub
     bl  subBytes
+
+    // ShiftRows(state_sub → state_shift)
+    ldr x0, =state_sub
+    ldr x1, =state_shift
+    bl  shiftRows
 
     ldp x29, x30, [sp], #16
     ret
@@ -449,7 +515,7 @@ _start:
     mov x2, lenDebugKey
     bl printMatrix
 
-    // Ejecutar AddRoundKey y SubBytes
+    // Ejecutar AddRoundKey, SubBytes y ShiftRows
     bl encript
 
     // Mostrar AddRoundKey
@@ -464,6 +530,12 @@ _start:
     mov x2, lenDebugSub
     bl printMatrix
 
+    // Mostrar ShiftRows
+    ldr x0, =state_shift
+    ldr x1, =debug_shift
+    mov x2, lenDebugShift
+    bl printMatrix
+    
     // Salir
     mov x0, #0
     mov x8, #93

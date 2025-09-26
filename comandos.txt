@@ -1,0 +1,20 @@
+rm -f *.o aes
+aarch64-linux-gnu-as -o main.o main.s
+aarch64-linux-gnu-ld -o aes main.o
+qemu-aarch64 ./aes
+
+/*COMMITS*/
+
+feat: cuando agregas una nueva funcionalidad.
+
+fix: cuando corriges un error.
+
+docs: cambios en documentación (README, comentarios, etc.).
+
+style: cambios de formato que no afectan la lógica (espacios, comas, identación).
+
+refactor: reestructuras el código sin cambiar comportamiento.
+
+test: agregas o corriges pruebas.
+
+chore: tareas de mantenimiento (dependencias, build, etc.).
