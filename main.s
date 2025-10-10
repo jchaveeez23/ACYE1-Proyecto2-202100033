@@ -1,5 +1,5 @@
 // ===============================
-// main.s  (AES-128 completo: KeyExpansion + 10 rondas con trazas)
+// main.s  (AES-128 completo: KeyExpansion corregido + 10 rondas con trazas)
 // ===============================
 
 // IMPORTAR ARCHIVO CONSTANTS.S (Sbox, Rcon)
@@ -125,7 +125,7 @@ printRoundTitle:
     b.lt 1f
     mov w2, #'1';  strb w2, [sp, #6]
     mov w2, #'0';  strb w2, [sp, #7]
-    mov w2, #10;   strb w2, [sp, #8]     // '\n'
+    mov w2, #10;   strb w2, [sp, #8]
     mov x2, #9
     b 2f
 1:
@@ -178,7 +178,7 @@ subBytes:
     b.ge 2f
     ldrb w24, [x20, x22]
     uxtb w24, w24
-    ldrb w25, [x23, x24]     // índice en X (ok)
+    ldrb w25, [x23, w24, uxtw]
     strb w25, [x21, x22]
     add x22, x22, #1
     b 1b
@@ -244,7 +244,7 @@ mix_col_loop:
     ldrb w1, [x20, x24]
     ldrb w2, [x20, x25]
     ldrb w3, [x20, x26]
-    // ×2 para a0..a3
+    // ×2 para a0..a3 (xtime)
     mov  w4, w0; and w9, w4, #0x80; lsl w4, w4, #1; and w4, w4, #0xFF; cbz w9, 1f; eor w4, w4, w27
 1:  mov  w5, w1; and w9, w5, #0x80; lsl w5, w5, #1; and w5, w5, #0xFF; cbz w9, 2f; eor w5, w5, w27
 2:  mov  w6, w2; and w9, w6, #0x80; lsl w6, w6, #1; and w6, w6, #0xFF; cbz w9, 3f; eor w6, w6, w27
@@ -264,63 +264,73 @@ mix_done:
 
 // ----------------------
 // KeyExpansion (AES-128)  x0=key(16B col-major), x1=roundWords(176B)
+// Guarda cada W[i] en big-endian: (row0<<24)|(row1<<16)|(row2<<8)|row3
 // ----------------------
 .type   keyExpansion, %function
 .global keyExpansion
 keyExpansion:
     stp x29, x30, [sp, #-32]!
     mov x29, sp
-    mov x19, x0
-    mov x20, x1
-    // W0..W3 desde columnas
+    mov x19, x0          // key
+    mov x20, x1          // roundWords base
+
+    // W0..W3 desde columnas (big-endian por palabra)
     mov x2, #0
 ke_init_cols:
     cmp x2, #4
     b.ge ke_init_done
-    ldrb w3, [x19, x2]
-    add x4, x2, #4;  ldrb w4, [x19, x4]
-    add x5, x2, #8;  ldrb w5, [x19, x5]
-    add x6, x2, #12; ldrb w6, [x19, x6]
-    orr w7, wzr, w3
-    orr w7, w7, w4, lsl #8
-    orr w7, w7, w5, lsl #16
-    orr w7, w7, w6, lsl #24
+    ldrb w3, [x19, x2]          // row0
+    add  x4, x2, #4;  ldrb w4, [x19, x4]    // row1
+    add  x5, x2, #8;  ldrb w5, [x19, x5]    // row2
+    add  x6, x2, #12; ldrb w6, [x19, x6]    // row3
+    // BIG-ENDIAN
+    orr w7, wzr, w3, lsl #24
+    orr w7, w7,  w4, lsl #16
+    orr w7, w7,  w5, lsl #8
+    orr w7, w7,  w6
     add x8, x20, x2, lsl #2
     str w7, [x8]
     add x2, x2, #1
     b ke_init_cols
 ke_init_done:
+
     // W4..W43
-    add x9,  x20, #16
-    mov x10, x20
-    mov w11, #4
-    mov w12, #0
+    add x9,  x20, #16      // &W[4]
+    mov x10, x20           // &W[0]
+    mov w11, #4            // i = 4
+    mov w12, #0            // idx Rcon (0..9)
     ldr x13, =Sbox
     ldr x14, =Rcon
 ke_loop:
     cmp w11, #44
     b.ge ke_done
-    ldr w4, [x9, #-4]         // temp = W[i-1]
+
+    ldr w4, [x9, #-4]      // temp = W[i-1] (big-endian)
+
+    // if (i % 4 == 0): temp = SubWord(RotWord(temp)) ^ (Rcon[i/4] << 24)
     and w15, w11, #3
     cbnz w15, ke_no_core
-    // core: RotWord + SubWord + Rcon
+
+    // RotWord (rol8)
     ror w4, w4, #24
-    uxtb w5, w4
-    ldrb w5, [x13, w5, uxtw]
-    lsr  w6, w4, #8;  uxtb w6, w6
-    ldrb w6, [x13, w6, uxtw]
-    lsr  w7, w4, #16; uxtb w7, w7
-    ldrb w7, [x13, w7, uxtw]
-    lsr  w8, w4, #24; uxtb w8, w8
-    ldrb w8, [x13, w8, uxtw]
-    orr  w4, wzr, w5
-    orr  w4, w4, w6, lsl #8
-    orr  w4, w4, w7, lsl #16
-    orr  w4, w4, w8, lsl #24
+
+    // SubWord por bytes MSB..LSB
+    lsr  w5, w4, #24;  uxtb w5, w5;  ldrb w5, [x13, w5, uxtw]
+    lsr  w6, w4, #16;  uxtb w6, w6;  ldrb w6, [x13, w6, uxtw]
+    lsr  w7, w4, #8;   uxtb w7, w7;  ldrb w7, [x13, w7, uxtw]
+    uxtb w8, w4;                     ldrb w8, [x13, w8, uxtw]
+    // reensamblar big-endian
+    orr  w4, wzr, w5, lsl #24
+    orr  w4, w4,  w6, lsl #16
+    orr  w4, w4,  w7, lsl #8
+    orr  w4, w4,  w8
+
+    // Rcon[i/4] está almacenado como 0x000000rc -> mover a MSB
     ldr  w17, [x14, w12, uxtw #2]
-    eor  w4, w4, w17
+    eor  w4, w4, w17, lsl #24
     add  w12, w12, #1
 ke_no_core:
+    // W[i] = W[i-4] ^ temp
     ldr w6, [x10]
     eor w6, w6, w4
     str w6, [x9]
@@ -335,21 +345,23 @@ ke_done:
 
 // ----------------------
 // formatRoundKey: roundWords -> matriz col-major (x0=&roundWords, w1=round, x2=&out)
+// Toma W[4r..4r+3] en big-endian y los vuelca a matriz (col-major):
+//   fila0 = (W >>24), fila1 = (W >>16), fila2=(W >>8), fila3=(W >>0)
 // ----------------------
 .type   formatRoundKey, %function
 .global formatRoundKey
 formatRoundKey:
-    add  x3, x0, w1, uxtw #4        // base = round*16
+    add  x3, x0, w1, uxtw #4        // base = round*16 bytes
     mov  x4, #0
 frk_col_loop:
     cmp  x4, #4
     b.ge frk_done
     add  x5, x3, x4, lsl #2
-    ldr  w6, [x5]
-    uxtb w7,  w6
-    lsr  w8,  w6, #8;  uxtb w8,  w8
-    lsr  w9,  w6, #16; uxtb w9,  w9
-    lsr  w10, w6, #24; uxtb w10, w10
+    ldr  w6, [x5]                   // W[4r+col] big-endian
+    lsr  w7,  w6, #24; uxtb w7,  w7 // fila 0
+    lsr  w8,  w6, #16; uxtb w8,  w8 // fila 1
+    lsr  w9,  w6, #8;  uxtb w9,  w9 // fila 2
+    uxtb w10, w6                    // fila 3
     strb w7,  [x2, x4]
     add  x11, x4, #4;  strb w8,  [x2, x11]
     add  x11, x4, #8;  strb w9,  [x2, x11]
@@ -591,7 +603,6 @@ r_last:
     ret
     .size runAES10, (. - runAES10)
 
-
 // ----------------------
 // Lectura/parseo de texto y clave
 // ----------------------
@@ -707,7 +718,7 @@ hex_error:
 .type   _start, %function
 .global _start
 _start:
-    // Leer texto
+    // Leer texto ASCII (máx 16)
     print 1, msg_txt, lenMsgTxt
     bl readTextInput
     // Mostrar estado inicial
@@ -716,16 +727,16 @@ _start:
     mov x2, lenDebugState
     bl printMatrix
 
-    // Leer clave
+    // Leer clave (32 hex)
     print 1, msg_key, lenMsgKey
     bl convertHexKey
-    // Mostrar clave base (como matriz de 16B)
+    // Mostrar clave base (como matriz 16B, col-major)
     ldr x0, =key
     ldr x1, =debug_key
     mov x2, lenDebugKey
     bl printMatrix
 
-    // Expandir clave (genera W0..W43)
+    // Expandir clave (genera W0..W43 con orden correcto)
     ldr x0, =key
     ldr x1, =roundWords
     bl  keyExpansion
